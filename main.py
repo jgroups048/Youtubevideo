@@ -1,97 +1,155 @@
 from fastapi import FastAPI, Request
-import httpx, os
-from pytube import YouTube
-from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request as GoogleRequest
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
+import yt_dlp
+import requests
+import json
+import os
 import pickle
 
 app = FastAPI()
 
-@app.get("/")
-def root():
-    return {"status": "Bot is running!"}
+# Constants
+TELEGRAM_BOT_TOKEN = '7643358360:AAEtlp6x4dSO_ea7NkBaIUozzeOo-z2Web4'
+TELEGRAM_API_BASE = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}'
+YOUTUBE_SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+TOKEN_PICKLE = 'token.pickle'
+CLIENT_SECRETS_FILE = 'client_secret_892001422416-74a3m7taa8iqfp2ss8324bvq2m2nr601.apps.googleusercontent.com.json'
 
-# === Your fixed variables ===
-BOT_TOKEN = "7643358360:AAEtlp6x4dSO_ea7NkBaIUozzeOo-z2Web4"
-RENDER_URL = "https://youtube-automation-tool-d0au.onrender.com"
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+def send_telegram_message(chat_id: str, text: str):
+    """Send a message back to Telegram user"""
+    url = f'{TELEGRAM_API_BASE}/sendMessage'
+    payload = {
+        'chat_id': chat_id,
+        'text': text
+    }
+    requests.post(url, json=payload)
 
-@app.on_event("startup")
-async def set_webhook():
-    webhook_url = f"{RENDER_URL}{WEBHOOK_PATH}"
-    async with httpx.AsyncClient() as client:
-        await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
-
-@app.post(WEBHOOK_PATH)
-async def telegram_webhook(req: Request):
-    data = await req.json()
-    msg = data.get("message", {})
-    chat_id = msg.get("chat", {}).get("id")
-    text = msg.get("text", "")
-
-    if "youtube.com" in text or "youtu.be" in text:
-        await send_message(chat_id, "Checking video for copyright...")
-        if check_copyright_safe(text):
-            await send_message(chat_id, "Downloading and uploading...")
-            filepath = download_video(text)
-            if filepath:
-                upload_to_youtube(filepath)
-                await send_message(chat_id, "Uploaded to your channel!")
-            else:
-                await send_message(chat_id, "Failed to download video.")
-        else:
-            await send_message(chat_id, "Video has copyright issues. Skipping upload.")
-    else:
-        await send_message(chat_id, "Please send a valid YouTube link.")
-    return {"ok": True}
-
-async def send_message(chat_id, text):
-    async with httpx.AsyncClient() as client:
-        await client.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": text})
-
-def check_copyright_safe(url):
-    try:
-        yt = YouTube(url)
-        return not yt.age_restricted and "music" not in yt.title.lower()
-    except Exception as e:
-        print("Copyright check error:", e)
-        return False
-
-def download_video(url):
-    try:
-        yt = YouTube(url)
-        stream = yt.streams.filter(progressive=True, file_extension="mp4").order_by("resolution").desc().first()
-        return stream.download(filename="video.mp4")
-    except Exception as e:
-        print("Download error:", e)
-        return None
-
-def upload_to_youtube(filepath):
-    SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+def get_youtube_credentials():
+    """Get or refresh YouTube API credentials"""
     creds = None
-
-    if os.path.exists("token.pickle"):
-        with open("token.pickle", "rb") as token:
+    if os.path.exists(TOKEN_PICKLE):
+        with open(TOKEN_PICKLE, 'rb') as token:
             creds = pickle.load(token)
-
+    
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(GoogleRequest())
         else:
-            print("ERROR: Missing valid token.pickle. Upload will not work on Render.")
-            return
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRETS_FILE, YOUTUBE_SCOPES)
+            creds = flow.run_local_server(port=0)
+        with open(TOKEN_PICKLE, 'wb') as token:
+            pickle.dump(creds, token)
+    
+    return creds
 
-    youtube = build("youtube", "v3", credentials=creds)
-    request = youtube.videos().insert(
-        part="snippet,status",
-        body={
-            "snippet": {
-                "title": "Uploaded via Telegram Bot",
-                "description": "This video was uploaded using a bot."
-            },
-            "status": {"privacyStatus": "private"}
+def check_copyright(video_url: str) -> tuple[bool, str, str]:
+    """Check video for potential copyright issues using yt-dlp"""
+    ydl_opts = {
+        'simulate': True,
+        'quiet': True,
+        'no_warnings': True,
+        'extract_flat': True
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            return True, info.get('title', ''), info.get('description', '')
+    except Exception as e:
+        if 'copyright' in str(e).lower():
+            return False, '', ''
+        raise e
+
+def download_video(video_url: str) -> str:
+    """Download video using yt-dlp"""
+    ydl_opts = {
+        'format': 'best',
+        'outtmpl': '%(title)s.%(ext)s'
+    }
+    
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(video_url, download=True)
+        return ydl.prepare_filename(info)
+
+def upload_to_youtube(video_path: str, title: str, description: str) -> str:
+    """Upload video to YouTube using YouTube Data API"""
+    creds = get_youtube_credentials()
+    youtube = build('youtube', 'v3', credentials=creds)
+    
+    body = {
+        'snippet': {
+            'title': title,
+            'description': description,
+            'tags': ['auto-upload']
         },
-        media_body=filepath
+        'status': {
+            'privacyStatus': 'private'
+        }
+    }
+    
+    insert_request = youtube.videos().insert(
+        part=','.join(body.keys()),
+        body=body,
+        media_body=MediaFileUpload(video_path, chunksize=-1, resumable=True)
     )
-    response = request.execute()
-    print("Uploaded video ID:", response.get("id"))
+    
+    response = insert_request.execute()
+    return f'https://youtu.be/{response["id"]}'
+
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Handle incoming Telegram webhook requests"""
+    try:
+        data = await request.json()
+        message = data.get('message', {})
+        chat_id = message.get('chat', {}).get('id')
+        text = message.get('text', '')
+        
+        if not text or not chat_id:
+            return {"status": "error", "message": "Invalid message format"}
+        
+        # Check if message contains a YouTube URL
+        if 'youtube.com' not in text and 'youtu.be' not in text:
+            send_telegram_message(chat_id, "Please send a valid YouTube video URL")
+            return {"status": "error", "message": "Not a YouTube URL"}
+        
+        # Send initial status
+        send_telegram_message(chat_id, "Processing your request...")
+        
+        # Check for copyright issues
+        is_safe, title, description = check_copyright(text)
+        if not is_safe:
+            send_telegram_message(chat_id, "⚠️ This video might have copyright issues. Cannot proceed.")
+            return {"status": "error", "message": "Copyright issues detected"}
+        
+        # Download the video
+        send_telegram_message(chat_id, "✅ No copyright issues detected. Downloading video...")
+        video_path = download_video(text)
+        
+        # Upload to YouTube
+        send_telegram_message(chat_id, "📤 Uploading to YouTube...")
+        youtube_url = upload_to_youtube(video_path, title, description)
+        
+        # Clean up downloaded file
+        os.remove(video_path)
+        
+        # Send success message
+        send_telegram_message(
+            chat_id,
+            f"✅ Upload complete!\nTitle: {title}\nYouTube URL: {youtube_url}"
+        )
+        
+        return {"status": "success"}
+        
+    except Exception as e:
+        if chat_id:
+            send_telegram_message(chat_id, f"❌ Error: {str(e)}")
+        return {"status": "error", "message": str(e)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
