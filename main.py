@@ -6,6 +6,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request as GoogleRequest
 import pickle
 
+@app.get("/")
+def root():
+    return {"status": "Bot is running!"}
+    
 app = FastAPI()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
