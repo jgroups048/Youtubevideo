@@ -1,22 +1,24 @@
 from fastapi import FastAPI, Request
-import httpx, os, json, subprocess
+import httpx, os
 from pytube import YouTube
 from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request as GoogleRequest
 import pickle
+
+app = FastAPI()
 
 @app.get("/")
 def root():
     return {"status": "Bot is running!"}
-    
-app = FastAPI()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# === Your fixed variables ===
+BOT_TOKEN = "7643358360:AAEtlp6x4dSO_ea7NkBaIUozzeOo-z2Web4"
+RENDER_URL = "https://youtube-automation-tool-d0au.onrender.com"
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 
 @app.on_event("startup")
 async def set_webhook():
-    webhook_url = f"{os.getenv('RENDER_URL')}{WEBHOOK_PATH}"
+    webhook_url = f"{RENDER_URL}{WEBHOOK_PATH}"
     async with httpx.AsyncClient() as client:
         await client.get(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook?url={webhook_url}")
 
@@ -51,7 +53,8 @@ def check_copyright_safe(url):
     try:
         yt = YouTube(url)
         return not yt.age_restricted and "music" not in yt.title.lower()
-    except:
+    except Exception as e:
+        print("Copyright check error:", e)
         return False
 
 def download_video(url):
@@ -70,14 +73,13 @@ def upload_to_youtube(filepath):
     if os.path.exists("token.pickle"):
         with open("token.pickle", "rb") as token:
             creds = pickle.load(token)
+
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(GoogleRequest())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file("client_secrets.json", SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open("token.pickle", "wb") as token:
-            pickle.dump(creds, token)
+            print("ERROR: Missing valid token.pickle. Upload will not work on Render.")
+            return
 
     youtube = build("youtube", "v3", credentials=creds)
     request = youtube.videos().insert(
@@ -92,4 +94,4 @@ def upload_to_youtube(filepath):
         media_body=filepath
     )
     response = request.execute()
-    print("Uploaded:", response.get("id"))
+    print("Uploaded video ID:", response.get("id"))
