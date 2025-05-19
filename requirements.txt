@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+httpx
+pytube
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
